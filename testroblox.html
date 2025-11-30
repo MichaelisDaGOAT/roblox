@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roblox Baseplate Simulator - v3.1 (Roblox Rotation)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three-bvh-csg@latest/dist/three-bvh-csg.umd.js"></script> 
+    
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1f2937; }
+        #game-container {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        canvas {
+            display: block;
+            touch-action: none; /* Prevent unwanted touch actions */
+        }
+        .ui-panel {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 8px 16px;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            border-radius: 8px;
+            font-family: 'Inter', sans-serif;
+            font-size: 0.9rem;
+            text-align: center;
+        }
+        /* NEW: Style for the Leave Button */
+        .leave-button-container {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000; /* Ensure it's on top of the canvas */
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        
+    </div>
+    <div class="ui-panel" id="ui-controls">
+        WASD Move | SHIFT Run | SPACE Jump | C Toggle Camera | **I/O Zoom** | LMB Build (FP Mode)
+    </div>
+
+    <div class="leave-button-container">
+        <button id="leave-game-btn" onclick="leaveExperience()" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded shadow-lg transition duration-150">
+            Leave Experience
+        </button>
+    </div>
+
+    <script> 
+        // Global variables for Three.js setup
+        let scene, camera, renderer;
+        let avatar, avatarParts; 
+        let clock = new THREE.Clock();
+        
+        // --- Movement & Physics State ---
+        const keys = { w: false, a: false, s: false, d: false, shift: false, space: false, c: false, i: false, o: false };
+        let isMoving = false; 
+        let currentMoveSpeed = 4;
+        const walkSpeed = 4; 
+        const runSpeed = 8;
+        
+        // Physics constants
+        const gravity = -9.8; // m/s^2
+        let velocityY = 0;
+        const jumpPower = 6;
+        let isOnGround = true;
+
+        // --- Camera State (Updated for Pitch) ---
+        let isFirstPerson = false;
+        let cameraDistance = 10; // Initial default distance
+        const minCameraDistance = 1.5; 
+        const maxCameraDistance = 30;  
+        const zoomSpeed = 50;          
+        const baseplateBoundary = 490;
+        let cameraAngle = 0; // Horizontal angle (Yaw)
+        let cameraPitch = 0; // NEW: Vertical angle (Pitch)
+        const maxPitch = Math.PI * 0.45; // Limit for looking up/down
+        let isPointerLocked = false;
+        let previousMousePosition = { x: 0, y: 0 }; 
+        
+        // Detailed block dimensions (copied from previous)
+        const partDims = {
+            head: [1, 1.1, 1], 
+            neck: [0.5, 0.3, 0.5], 
+            torso: [1, 2, 0.5], 
+            upperArm: [0.5, 1, 0.5], 
+            lowerArm: [0.5, 1, 0.5],
+            hand: [0.5, 0.5, 0.5], 
+            upperLeg: [0.5, 1, 0.5], 
+            lowerLeg: [0.5, 1, 0.5], 
+            shoe: [0.6, 0.2, 0.6] 
+        };
+        
+        const totalAvatarHeight = 5.6; 
+        const standingYPosition = -0.5 + (totalAvatarHeight / 2); // 2.3
+
+        // --- Core Setup Functions (Unchanged) ---
+        
+        function init() {
+            try {
+                if (typeof THREE === 'undefined') {
+                    console.error("Critical Error: Three.js library failed to load.");
+                    return;
+                }
+                
+                // Scene
+                scene = new THREE.Scene();
+                
+                // Renderer
+                renderer = new THREE.WebGLRenderer({ antialias: true });
+                renderer.setClearColor(0x66ccff, 1); 
+                scene.fog = new THREE.Fog(0x66ccff, 100, 400); 
+
+                // --- Shadow Setup ---
+                renderer.shadowMap.enabled = true;
+                renderer.shadowMap.type = THREE.PCFSoftShadowMap; 
+
+                // Camera (3rd person initially)
+                camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                
+                // Renderer setup
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                renderer.setPixelRatio(window.devicePixelRatio);
+                
+                const container = document.getElementById('game-container');
+                if (!container) {
+                    console.error("Critical Error: #game-container not found in the DOM.");
+                    return;
+                }
+                
+                container.appendChild(renderer.domElement);
+                console.log("Canvas successfully added to the DOM.");
+
+
+                // Lighting
+                const ambientLight = new THREE.AmbientLight(0x606060); 
+                scene.add(ambientLight);
+
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(20, 50, 20); 
+                directionalLight.castShadow = true;
+                
+                directionalLight.shadow.mapSize.width = 1024;
+                directionalLight.shadow.mapSize.height = 1024;
+                const d = 50;
+                directionalLight.shadow.camera.left = -d;
+                directionalLight.shadow.camera.right = d;
+                directionalLight.shadow.camera.top = d;
+                directionalLight.shadow.camera.bottom = -d;
+                directionalLight.shadow.camera.near = 0.5;
+                directionalLight.shadow.camera.far = 100;
+                scene.add(directionalLight);
+                scene.add(directionalLight.target); 
+
+                // Create environment components
+                createGridBaseplate();
+                createSpawnPlate();
+                createAvatar();
+
+                updateCameraPosition();
+
+                // Event Listeners
+                window.addEventListener('resize', onWindowResize, false);
+                document.addEventListener('keydown', onKeyDown, false);
+                document.addEventListener('keyup', onKeyUp, false);
+                renderer.domElement.addEventListener('click', onCanvasClick, false);
+                document.addEventListener('mousemove', onMouseMove, false);
+                document.addEventListener('pointerlockchange', onPointerLockChange, false);
+                
+                // Touch events for mobile compatibility (limited controls)
+                renderer.domElement.addEventListener('touchstart', onTouchStart, false);
+                document.addEventListener('touchend', onTouchEnd, false);
+                document.addEventListener('touchmove', onTouchMove, false);
+                
+                // Start the animation loop
+                animate();
+                console.log("Three.js initialization complete. Animation loop started.");
+
+            } catch (error) {
+                console.error("An error occurred during Three.js initialization:", error);
+                const errorDiv = document.createElement('div');
+                errorDiv.innerText = "Error initializing 3D environment. Check console for details.";
+                errorDiv.style.cssText = 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #fff; background: #c0392b; padding: 20px; border-radius: 8px; z-index: 1000; font-family: sans-serif;';
+                document.body.appendChild(errorDiv);
+            }
+        }
+
+        function createGridTexture() {
+            const canvas = document.createElement('canvas');
+            const size = 64;
+            canvas.width = size;
+            canvas.height = size;
+            const context = canvas.getContext('2d');
+            
+            const lightGray = '#A0A0A0'; 
+            const mediumGray = '#808080';
+            const lineColor = '#666666';
+
+            context.fillStyle = lightGray;
+            context.fillRect(0, 0, size, size);
+            context.fillStyle = mediumGray;
+            context.fillRect(0, 0, size / 2, size / 2);
+            context.fillRect(size / 2, size / 2, size / 2, size / 2);
+
+            context.strokeStyle = lineColor;
+            context.lineWidth = 1;
+            context.beginPath();
+            context.moveTo(0, size);
+            context.lineTo(size, size);
+            context.moveTo(size, 0);
+            context.lineTo(size, size);
+            context.stroke();
+
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.wrapS = THREE.RepeatWrapping;
+            texture.wrapT = THREE.RepeatWrapping;
+            texture.repeat.set(500, 500); 
+            return texture;
+        }
+
+        function createFaceTexture() {
+            const canvas = document.createElement('canvas');
+            const size = 128; 
+            canvas.width = size;
+            canvas.height = size;
+            const context = canvas.getContext('2d');
+            
+            context.fillStyle = 'rgba(0,0,0,0)'; 
+            context.fillRect(0, 0, size, size);
+
+            context.fillStyle = '#000000';
+            const eyeSize = size * 0.1;
+
+            context.fillRect(size * 0.3, size * 0.35, eyeSize, eyeSize * 2);
+            context.fillRect(size * 0.6, size * 0.35, eyeSize, eyeSize * 2);
+            
+            context.lineWidth = 4;
+            context.beginPath();
+            context.arc(size/2, size * 0.7, size * 0.2, 0, Math.PI, false);
+            context.stroke();
+
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        function createGridBaseplate() {
+            const texture = createGridTexture();
+            const material = new THREE.MeshLambertMaterial({ map: texture });
+            const geometry = new THREE.PlaneGeometry(1000, 1000); 
+            const plane = new THREE.Mesh(geometry, material);
+            plane.rotation.x = -Math.PI / 2;
+            plane.position.y = -0.5;
+            plane.receiveShadow = true; 
+            plane.name = "Baseplate"; 
+            scene.add(plane);
+        }
+
+        function createSpawnPlate() {
+            const geometry = new THREE.BoxGeometry(4, 0.05, 4);
+            const material = new THREE.MeshLambertMaterial({ color: 0xe0e0e0 }); 
+            const spawnPlate = new THREE.Mesh(geometry, material);
+            spawnPlate.position.y = -0.475;
+            spawnPlate.name = "SpawnPlate";
+            spawnPlate.receiveShadow = true;
+            scene.add(spawnPlate);
+            
+            const decalGeo = new THREE.BoxGeometry(3.5, 0.01, 3.5); 
+            const decalMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.1 });
+            const decal = new THREE.Mesh(decalGeo, decalMat);
+            decal.position.y = 0.001; 
+            spawnPlate.add(decal);
+        }
+
+        function createAvatar() {
+            const group = new THREE.Group();
+            group.position.set(0, standingYPosition, 0); 
+            
+            avatarParts = {};
+
+            const materials = {
+                skin: new THREE.MeshLambertMaterial({ color: 0xffffff }), 
+                shirt: new THREE.MeshLambertMaterial({ color: 0x0080ff }),
+                jacket: new THREE.MeshLambertMaterial({ color: 0x222222 }),
+                pants: new THREE.MeshLambertMaterial({ color: 0x333333 }),
+                hair: new THREE.MeshLambertMaterial({ color: 0x7c3809 }),
+                shoes: new THREE.MeshLambertMaterial({ color: 0xffffff }),
+            };
+
+            const createMesh = (geometry, material) => {
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.castShadow = true;
+                mesh.receiveShadow = false; 
+                return mesh;
+            };
+
+            // 1. HEAD
+            const headGeo = new THREE.CylinderGeometry(partDims.head[0] / 2, partDims.head[0] / 2, partDims.head[1], 16);
+            const headMesh = createMesh(headGeo, materials.skin); 
+            headMesh.position.y = partDims.head[1] / 2;
+            
+            const faceTexture = createFaceTexture();
+            const faceMaterial = new THREE.MeshBasicMaterial({ map: faceTexture, transparent: true, side: THREE.FrontSide });
+            
+            const faceDecalGeo = new THREE.PlaneGeometry(0.8, 0.8); 
+            const faceDecal = new THREE.Mesh(faceDecalGeo, faceMaterial);
+            faceDecal.position.z = partDims.head[0] / 2 + 0.001; 
+            headMesh.add(faceDecal);
+
+            // --- DETAILED HAIR MODEL ---
+            const hairGroup = new THREE.Group();
+            hairGroup.position.y = partDims.head[1] / 2; 
+
+            // Base Hair (Top Block)
+            const baseHairGeo = new THREE.BoxGeometry(1.05, 0.4, 1.05);
+            const baseHair = createMesh(baseHairGeo, materials.hair);
+            baseHair.position.y = 0.2; 
+            hairGroup.add(baseHair);
+
+            // Bangs (Front piece)
+            const bangsGeo = new THREE.BoxGeometry(0.8, 0.4, 0.1);
+            const bangs = createMesh(bangsGeo, materials.hair);
+            bangs.position.set(0, 0.05, partDims.head[0] / 2 + 0.05); 
+            bangs.rotation.x = THREE.MathUtils.degToRad(-10); 
+            hairGroup.add(bangs);
+
+            // Side Bits/Sideburns (Left)
+            const sideLGeo = new THREE.BoxGeometry(0.1, 0.5, 0.5);
+            const sideL = createMesh(sideLGeo, materials.hair);
+            sideL.position.set(-partDims.head[0] / 2 - 0.05, -0.1, 0);
+            hairGroup.add(sideL);
+
+            // Side Bits/Sideburns (Right)
+            const sideRGeo = new THREE.BoxGeometry(0.1, 0.5, 0.5);
+            const sideR = createMesh(sideRGeo, materials.hair);
+            sideR.position.set(partDims.head[0] / 2 + 0.05, -0.1, 0);
+            hairGroup.add(sideR);
+
+            headMesh.add(hairGroup);
+
+            const headPivot = new THREE.Group();
+            headPivot.add(headMesh);
+            
+            // 2. NECK
+            const neckGeo = new THREE.BoxGeometry(partDims.neck[0], partDims.neck[1], partDims.neck[2]);
+            const neckMesh = createMesh(neckGeo, materials.skin);
+            neckMesh.position.y = (partDims.torso[1] / 2) + (partDims.neck[1] / 2);
+            group.add(neckMesh);
+            avatarParts.neck = neckMesh;
+
+            // 3. Head-Neck Connection (Lowered Even Further)
+            headPivot.position.y = (partDims.torso[1] / 2) + partDims.neck[1] + (partDims.head[1] / 2) - 0.35; 
+            group.add(headPivot);
+            avatarParts.head = headPivot;
+
+            // 4. TORSO (Blue Shirt underneath)
+            const torsoGeo = new THREE.BoxGeometry(partDims.torso[0], partDims.torso[1], partDims.torso[2]);
+            const torsoMesh = createMesh(torsoGeo, materials.shirt); // Blue shirt
+            torsoMesh.position.y = 0; 
+            
+            // 5. BLACK JACKET (Outer Layer with cutout via CSG)
+            const jacketOuterGeo = new THREE.BoxGeometry(partDims.torso[0] * 1.05, partDims.torso[1] * 1.05, partDims.torso[2] * 1.05);
+            const jacketCutoutGeo = new THREE.BoxGeometry(partDims.torso[0] * 0.5, partDims.torso[1] * 0.7, partDims.torso[2] * 1.5);
+            jacketCutoutGeo.translate(0, partDims.torso[1] * -0.05, partDims.torso[2] * 0.01);
+
+            const Threebvhcsg = window.Threebvhcsg;
+            if (typeof Threebvhcsg === 'undefined') {
+                console.warn("CSG library not loaded. Jacket will be rendered as a solid block.");
+                const solidJacketMesh = createMesh(jacketOuterGeo, materials.jacket);
+                solidJacketMesh.position.y = 0;
+                torsoMesh.add(solidJacketMesh); 
+            } else {
+                const jacketOuterBSP = new Threebvhcsg.CSGGeometry(jacketOuterGeo);
+                const jacketCutoutBSP = new Threebvhcsg.CSGGeometry(jacketCutoutGeo);
+
+                const jacketResultBSP = jacketOuterBSP.subtract(jacketCutoutBSP);
+                const jacketMesh = new THREE.Mesh(jacketResultBSP, materials.jacket);
+                jacketMesh.castShadow = true;
+                jacketMesh.position.y = 0;
+                torsoMesh.add(jacketMesh); 
+            }
+
+            const torsoPivot = new THREE.Group();
+            torsoPivot.position.y = 0; 
+            torsoPivot.add(torsoMesh);
+            group.add(torsoPivot);
+            avatarParts.torso = torsoPivot;
+
+            // 6. ARMS (2 pieces + Hand)
+            function createDetailedArm(isRight) {
+                const upperArmPivot = new THREE.Group();
+                const upperArmMesh = createMesh(new THREE.BoxGeometry(...partDims.upperArm), materials.skin);
+                upperArmMesh.position.y = -partDims.upperArm[1] / 2; 
+                upperArmPivot.add(upperArmMesh);
+                const lowerArmPivot = new THREE.Group();
+                lowerArmPivot.position.y = -partDims.upperArm[1]; 
+                upperArmPivot.add(lowerArmPivot);
+                const lowerArmMesh = createMesh(new THREE.BoxGeometry(...partDims.lowerArm), materials.skin);
+                lowerArmMesh.position.y = -partDims.lowerArm[1] / 2; 
+                lowerArmPivot.add(lowerArmMesh);
+                const handRadius = partDims.hand[0] / 2;
+                const handGeo = new THREE.SphereGeometry(handRadius, 16, 16);
+                const handMesh = createMesh(handGeo, materials.skin);
+                handMesh.position.y = -partDims.lowerArm[1] - handRadius; 
+                lowerArmPivot.add(handMesh);
+                const offsetX = isRight ? (partDims.torso[0] / 2 + partDims.upperArm[0] / 2) : -(partDims.torso[0] / 2 + partDims.upperArm[0] / 2);
+                upperArmPivot.position.set(offsetX, partDims.torso[1] / 2, 0); 
+                group.add(upperArmPivot);
+                return { upper: upperArmPivot, lower: lowerArmPivot };
+            }
+            
+            const rArmParts = createDetailedArm(true);
+            const lArmParts = createDetailedArm(false);
+
+            avatarParts.rArm = rArmParts.upper;
+            avatarParts.lArm = lArmParts.upper;
+            avatarParts.rLowerArm = rArmParts.lower;
+            avatarParts.lLowerArm = lArmParts.lower;
+
+            // 7. LEGS (2 pieces + Shoe)
+            function createDetailedLeg(isRight) {
+                const upperLegPivot = new THREE.Group();
+                const upperLegMesh = createMesh(new THREE.BoxGeometry(...partDims.upperLeg), materials.pants);
+                upperLegMesh.position.y = -partDims.upperLeg[1] / 2; 
+                upperLegPivot.add(upperLegMesh);
+                const lowerLegPivot = new THREE.Group();
+                lowerLegPivot.position.y = -partDims.upperLeg[1]; 
+                upperLegPivot.add(lowerLegPivot);
+                const lowerLegMesh = createMesh(new THREE.BoxGeometry(...partDims.lowerLeg), materials.pants);
+                lowerLegMesh.position.y = -partDims.lowerLeg[1] / 2; 
+                lowerLegPivot.add(lowerLegMesh);
+                const shoeMesh = createMesh(new THREE.BoxGeometry(...partDims.shoe), materials.shoes);
+                shoeMesh.position.y = -partDims.lowerLeg[1] - (partDims.shoe[1] / 2); 
+                lowerLegPivot.add(shoeMesh);
+                const offsetX = isRight ? (partDims.torso[0] / 2 - partDims.upperLeg[0] / 2) : -(partDims.torso[0] / 2 - partDims.upperLeg[0] / 2);
+                upperLegPivot.position.set(offsetX, -partDims.torso[1] / 2, 0); 
+                group.add(upperLegPivot);
+                return { upper: upperLegPivot, lower: lowerLegPivot };
+            }
+            
+            const rLegParts = createDetailedLeg(true);
+            const lLegParts = createDetailedLeg(false);
+            
+            avatarParts.rLeg = rLegParts.upper;
+            avatarParts.lLeg = lLegParts.upper;
+            avatarParts.rLowerLeg = rLegParts.lower;
+            avatarParts.lLowerLeg = lLegParts.lower;
+
+            avatar = group;
+            scene.add(avatar);
+        }
+
+        // --- NEW FEATURE: Part Spawning (Unchanged) ---
+
+        function spawnBrick() {
+            if (!isFirstPerson) return;
+            
+            const brickSize = 1;
+            const geometry = new THREE.BoxGeometry(brickSize, brickSize, brickSize);
+            const material = new THREE.MeshLambertMaterial({ color: Math.random() * 0xffffff });
+            const brick = new THREE.Mesh(geometry, material);
+            
+            // Get the camera's forward direction to place the block
+            const raycaster = new THREE.Raycaster();
+            const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+
+            const avatarHeadPos = avatar.position.clone();
+            avatarHeadPos.y = avatar.position.y + totalAvatarHeight / 2 - partDims.head[1] * 0.5;
+            
+            const offsetDistance = 2;
+            brick.position.copy(avatarHeadPos.add(direction.multiplyScalar(offsetDistance)));
+            
+            brick.position.y = Math.max(brick.position.y, -0.5 + brickSize / 2);
+
+            brick.castShadow = true;
+            brick.receiveShadow = true;
+            scene.add(brick);
+            console.log(`Spawned brick at X: ${brick.position.x.toFixed(2)}, Y: ${brick.position.y.toFixed(2)}, Z: ${brick.position.z.toFixed(2)}`);
+        }
+        
+        function onCanvasClick(event) {
+            attemptPointerLock();
+            if (isFirstPerson) {
+                if (event.button === 0) {
+                    spawnBrick();
+                }
+            }
+        }
+
+        // --- Pointer Lock (Unchanged) ---
+
+        function attemptPointerLock() {
+            if (document.pointerLockElement !== renderer.domElement) {
+                renderer.domElement.requestPointerLock();
+            }
+        }
+
+        function onPointerLockChange() {
+            if (document.pointerLockElement === renderer.domElement) {
+                isPointerLocked = true;
+            } else {
+                isPointerLocked = false;
+            }
+        }
+        
+        // --- Event Handlers & Logic (Modified for Pitch) ---
+        
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function toggleCameraView() {
+            isFirstPerson = !isFirstPerson;
+            console.log("Camera mode switched to:", isFirstPerson ? "First-Person" : "Third-Person");
+            
+            // Avatar visibility is handled by updateCameraPosition to prevent flickering
+            
+            // Update UI
+            const uiPanel = document.getElementById('ui-controls');
+            if (uiPanel) {
+                 uiPanel.innerHTML = isFirstPerson
+                    ? 'WASD Move | SHIFT Run | SPACE Jump | C Toggle Camera | **I/O Zoom** | **LMB Build**'
+                    : 'WASD Move | SHIFT Run | SPACE Jump | Click to Lock Pointer | C Toggle Camera | **I/O Zoom**';
+            }
+            
+            updateCameraPosition();
+        }
+
+        function onKeyDown(event) {
+            switch (event.code) {
+                case 'KeyW': keys.w = true; break;
+                case 'KeyA': keys.a = true; break;
+                case 'KeyS': keys.s = true; break;
+                case 'KeyD': keys.d = true; break;
+                case 'ShiftLeft': 
+                case 'ShiftRight': keys.shift = true; break;
+                case 'Space': 
+                    if (isOnGround) {
+                        keys.space = true;
+                        velocityY = jumpPower; 
+                        isOnGround = false;
+                    }
+                    break;
+                case 'KeyC':
+                    if (!keys.c) {
+                        toggleCameraView();
+                    }
+                    keys.c = true;
+                    break;
+                case 'KeyI': keys.i = true; break; // Zoom In
+                case 'KeyO': keys.o = true; break; // Zoom Out
+            }
+        }
+
+        function onKeyUp(event) {
+            switch (event.code) {
+                case 'KeyW': keys.w = false; break;
+                case 'KeyA': keys.a = false; break;
+                case 'KeyS': keys.s = false; break;
+                case 'KeyD': keys.d = false; break;
+                case 'ShiftLeft': 
+                case 'ShiftRight': keys.shift = false; break;
+                case 'Space': keys.space = false; break;
+                case 'KeyC': keys.c = false; break;
+                case 'KeyI': keys.i = false; break;
+                case 'KeyO': keys.o = false; break;
+            }
+        }
+
+        function onMouseMove(event) {
+            if (!isPointerLocked) return;
+
+            const sensitivity = 0.002;
+            const deltaX = event.movementX || event.mozMovementX || event.webkitMovementX || 0;
+            const deltaY = event.movementY || event.mozMovementY || event.webkitMovementY || 0; // NEW: Get vertical movement
+
+            // 1. Horizontal Rotation (Yaw)
+            cameraAngle -= deltaX * sensitivity; 
+            
+            if (cameraAngle > Math.PI * 2) cameraAngle -= Math.PI * 2;
+            if (cameraAngle < 0) cameraAngle += Math.PI * 2;
+
+            // 2. Vertical Rotation (Pitch) - Invert deltaY for natural look-up/look-down
+            cameraPitch += deltaY * sensitivity; 
+            
+            // Clamp the pitch
+            cameraPitch = THREE.MathUtils.clamp(cameraPitch, -maxPitch, maxPitch); 
+
+            updateCameraPosition();
+        }
+
+        let isTouchDragging = false;
+        function onTouchStart(event) {
+            if (event.touches.length === 1) {
+                isTouchDragging = true;
+                previousMousePosition.x = event.touches[0].clientX;
+                previousMousePosition.y = event.touches[0].clientY; // Track Y for mobile pitch
+            }
+        }
+        
+        function onTouchEnd() {
+            isTouchDragging = false;
+        }
+
+        function onTouchMove(event) {
+            if (!isTouchDragging || event.touches.length !== 1) return;
+
+            const sensitivity = 0.01;
+            const deltaX = event.touches[0].clientX - previousMousePosition.x;
+            const deltaY = event.touches[0].clientY - previousMousePosition.y; // Calculate vertical drag
+            
+            // Update camera angles
+            cameraAngle -= deltaX * sensitivity; 
+            cameraPitch += deltaY * sensitivity; 
+
+            // Clamp and wrap
+            if (cameraAngle > Math.PI * 2) cameraAngle -= Math.PI * 2;
+            if (cameraAngle < 0) cameraAngle += Math.PI * 2;
+            cameraPitch = THREE.MathUtils.clamp(cameraPitch, -maxPitch, maxPitch); 
+            
+            previousMousePosition.x = event.touches[0].clientX;
+            previousMousePosition.y = event.touches[0].clientY;
+
+            updateCameraPosition();
+            event.preventDefault(); 
+        }
+
+        // --- Camera Zoom Logic ---
+        function updateCameraZoom(delta) {
+            if (isFirstPerson) return; // Zoom is only applied in 3rd person
+            
+            let zoomChange = 0;
+            if (keys.i) {
+                zoomChange += -zoomSpeed * delta; // I zooms in (decreases distance)
+            }
+            if (keys.o) {
+                zoomChange += zoomSpeed * delta; // O zooms out (increases distance)
+            }
+            
+            if (zoomChange !== 0) {
+                cameraDistance += zoomChange;
+                // Clamp distance to min/max boundaries
+                cameraDistance = THREE.MathUtils.clamp(cameraDistance, minCameraDistance, maxCameraDistance);
+            }
+        }
+
+
+        function updateAvatarPosition(delta) {
+            if (!avatar) return;
+            
+            currentMoveSpeed = keys.shift ? runSpeed : walkSpeed;
+
+            const moveVector = new THREE.Vector3(0, 0, 0);
+
+            if (keys.w) moveVector.z -= 1;
+            if (keys.s) moveVector.z += 1;
+            if (keys.a) moveVector.x -= 1;
+            if (keys.d) moveVector.x += 1;
+
+            isMoving = moveVector.lengthSq() > 0.01; 
+            
+            if (isMoving) {
+                moveVector.normalize();
+                
+                // Rotation Matrix based on the camera's YAW (cameraAngle)
+                const rotationMatrix = new THREE.Matrix4();
+                rotationMatrix.makeRotationY(cameraAngle);
+                
+                const direction = new THREE.Vector3(moveVector.x, 0, moveVector.z);
+                direction.applyMatrix4(rotationMatrix);
+
+                // Avatar Y-Rotation follows the direction of movement, which is camera-locked
+                const targetRotationY = Math.atan2(direction.x, direction.z);
+                let rotationDiff = targetRotationY - avatar.rotation.y;
+                
+                if (rotationDiff > Math.PI) rotationDiff -= 2 * Math.PI;
+                if (rotationDiff < -Math.PI) rotationDiff += 2 * Math.PI;
+
+                // Smooth rotation
+                avatar.rotation.y += rotationDiff * 0.15; 
+
+                avatar.position.addScaledVector(direction, currentMoveSpeed * delta);
+            }
+            
+            // World Boundary Check
+            const halfSize = totalAvatarHeight / 2;
+            avatar.position.x = THREE.MathUtils.clamp(avatar.position.x, -baseplateBoundary + halfSize, baseplateBoundary - halfSize);
+            avatar.position.z = THREE.MathUtils.clamp(avatar.position.z, -baseplateBoundary + halfSize, baseplateBoundary - halfSize);
+        }
+
+        function updatePhysics(delta) {
+            if (!avatar) return;
+
+            if (!isOnGround) {
+                velocityY += gravity * delta;
+                avatar.position.y += velocityY * delta;
+
+                if (avatar.position.y <= standingYPosition) {
+                    avatar.position.y = standingYPosition;
+                    velocityY = 0;
+                    isOnGround = true;
+                }
+            } else if (isMoving) {
+                 const bounce = Math.abs(Math.sin(clock.getElapsedTime() * currentMoveSpeed * 2)) * 0.05;
+                 avatar.position.y = standingYPosition + bounce;
+            } else {
+                 avatar.position.y = standingYPosition;
+            }
+        }
+        
+        function updateAvatarAnimation(time) {
+            if (!avatarParts) return;
+
+            const maxArmSwing = Math.PI * 0.25; 
+            const maxLegSwing = Math.PI * 0.35;
+            const maxLowerLimbSwing = Math.PI * 0.1; 
+            const walkCycleSpeed = currentMoveSpeed * 1.5;
+
+            // Preserve the X-rotation (pitch) set by the camera logic
+            const originalHeadPitch = avatarParts.head.rotation.x; 
+            
+            // Jump Animation
+            if (!isOnGround) {
+                const targetRotationX = -Math.PI / 1.1; 
+                
+                const armAngle = THREE.MathUtils.lerp(avatarParts.rArm.rotation.x, targetRotationX, 0.15);
+
+                avatarParts.rArm.rotation.x = armAngle;
+                avatarParts.lArm.rotation.x = armAngle;
+                
+                avatarParts.rLowerArm.rotation.x = 0;
+                avatarParts.lLowerArm.rotation.x = 0;
+                avatarParts.rLowerLeg.rotation.x = 0;
+                avatarParts.lLowerLeg.rotation.x = 0;
+                
+                // Re-apply the camera pitch
+                avatarParts.head.rotation.x = originalHeadPitch;
+                return;
+            }
+
+            // Idle/Walking/Running Animation
+            if (isMoving) {
+                const swing = Math.sin(time * walkCycleSpeed);
+                
+                avatarParts.rArm.rotation.x = swing * maxArmSwing;
+                avatarParts.lArm.rotation.x = -swing * maxArmSwing;
+
+                avatarParts.rLeg.rotation.x = -swing * maxLegSwing;
+                avatarParts.lLeg.rotation.x = swing * maxLegSwing;
+
+                avatarParts.rLowerArm.rotation.x = Math.abs(swing) * maxLowerLimbSwing;
+                avatarParts.lLowerArm.rotation.x = Math.abs(swing) * maxLowerLimbSwing;
+                avatarParts.rLowerLeg.rotation.x = Math.abs(swing) * maxLowerLimbSwing;
+                avatarParts.lLowerLeg.rotation.x = Math.abs(swing) * maxLowerLimbSwing;
+
+                // Torso and Head sway
+                avatarParts.torso.rotation.z = Math.sin(time * walkCycleSpeed * 0.5) * 0.05;
+                avatarParts.head.rotation.z = -avatarParts.torso.rotation.z;
+
+            } else {
+                // Idle animation - Lerp all non-head rotations back to zero
+                const idleSwing = Math.sin(time * 2) * 0.02;
+                avatarParts.rArm.rotation.x = idleSwing;
+                avatarParts.lArm.rotation.x = idleSwing;
+                
+                const lerpFactor = 0.1;
+                const lerpParts = [
+                    avatarParts.rLeg, avatarParts.lLeg, 
+                    avatarParts.rLowerArm, avatarParts.lLowerArm, 
+                    avatarParts.rLowerLeg, avatarParts.lLowerLeg, 
+                    avatarParts.torso, avatarParts.head
+                ];
+                
+                lerpParts.forEach(part => {
+                    if (part !== avatarParts.head) {
+                        part.rotation.x = THREE.MathUtils.lerp(part.rotation.x, 0, lerpFactor);
+                    }
+                    if (part.rotation.z !== undefined) {
+                        part.rotation.z = THREE.MathUtils.lerp(part.rotation.z, 0, lerpFactor);
+                    }
+                });
+            }
+            
+            // Re-apply the camera pitch to the head after all other animations
+            avatarParts.head.rotation.x = originalHeadPitch;
+        }
+        
+        function updateCameraPosition() {
+            if (!avatar) return;
+            
+            const targetPosition = avatar.position.clone();
+            const avatarHeightOffset = partDims.torso[1] * 0.8;
+            targetPosition.y += avatarHeightOffset; 
+            
+            // --- Head Pitch Rotation (Applied in FP and TP) ---
+            if (avatarParts && avatarParts.head) {
+                // Clamp Head rotation slightly less than the camera's max pitch to avoid neck stretching
+                const headPitch = THREE.MathUtils.clamp(cameraPitch, -maxPitch * 0.9, maxPitch * 0.9);
+                // The head is a child of the group, so rotation.x works for pitch
+                avatarParts.head.rotation.x = headPitch; 
+            }
+
+            if (isFirstPerson) {
+                // First-Person Mode
+                
+                // Hide avatar body
+                avatar.visible = false; 
+
+                // 1. Camera position (Eye level)
+                const headPivotY = avatar.position.y + totalAvatarHeight / 2 - partDims.head[1] * 0.5 + 0.1;
+                
+                // 2. Calculate the complex look vector using Yaw (cameraAngle) and Pitch (cameraPitch)
+                let lookVector = new THREE.Vector3(0, 0, 1);
+                
+                // Apply Y-rotation (Yaw) from the camera angle (This must match avatar.rotation.y)
+                lookVector.applyAxisAngle(new THREE.Vector3(0, 1, 0), cameraAngle); 
+                
+                // Apply X-rotation (Pitch)
+                const rightAxis = new THREE.Vector3().crossVectors(lookVector, new THREE.Vector3(0, 1, 0)).normalize();
+                lookVector.applyAxisAngle(rightAxis, cameraPitch);
+                
+                // Set the camera position just in front of the head
+                const cameraOffset = 0.01;
+                const fpCameraX = avatar.position.x + lookVector.x * cameraOffset;
+                const fpCameraZ = avatar.position.z + lookVector.z * cameraOffset;
+                
+                camera.position.set(fpCameraX, headPivotY, fpCameraZ);
+                
+                // Look in the direction of the fully rotated lookVector
+                camera.lookAt(fpCameraX + lookVector.x, headPivotY + lookVector.y, fpCameraZ + lookVector.z);
+                
+            } else {
+                // Third-Person Mode
+                
+                // Show avatar body
+                avatar.visible = true;
+
+                const orbitRadius = cameraDistance;
+                
+                // 1. Calculate the vertical position based on Pitch (Spherical Orbit)
+                // Pitch is the angle away from the horizontal plane (0 pitch looks horizontally)
+                
+                const y = targetPosition.y + Math.sin(cameraPitch) * orbitRadius;
+                
+                // 2. Calculate the horizontal radius change due to pitch
+                const horizontalRadius = Math.cos(cameraPitch) * orbitRadius;
+                
+                // 3. Calculate X/Z using the new horizontal radius and Yaw (cameraAngle)
+                const finalX = targetPosition.x + horizontalRadius * Math.sin(cameraAngle);
+                const finalZ = targetPosition.z + horizontalRadius * Math.cos(cameraAngle);
+                
+                camera.position.set(finalX, y, finalZ); 
+                
+                // The camera always looks at the target position (center of the avatar)
+                camera.lookAt(targetPosition);
+            }
+        }
+        
+        // NEW FUNCTION: Handles the confirmation and redirection
+        function leaveExperience() {
+            // Use the browser's built-in confirm dialog for the "Are you sure yes/no" functionality
+            const confirmed = confirm("Are you sure you want to leave the experience and return to KORBLOX Home?");
+            
+            if (confirmed) {
+                // If user clicks 'Yes' or 'OK', navigate back to Korblox.html
+                window.location.href = 'Korblox.html';
+            }
+            // If user clicks 'No' or 'Cancel', the function ends, and they stay in the game.
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (!scene || !camera || !renderer) return; 
+
+            const delta = clock.getDelta();
+            const time = clock.getElapsedTime();
+
+            updateCameraZoom(delta); 
+            
+            updateAvatarPosition(delta);
+            updatePhysics(delta);
+            updateAvatarAnimation(time);
+            updateCameraPosition(); // Recalculate camera position after all updates
+
+            renderer.render(scene, camera);
+        }
+
+        // Initialize the scene when the window loads
+        window.onload = init;
+    </script>
+</body>
